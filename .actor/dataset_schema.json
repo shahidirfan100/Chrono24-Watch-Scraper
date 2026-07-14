@@ -1,0 +1,105 @@
+{
+    "actorSpecification": 1,
+    "views": {
+        "overview": {
+            "title": "Overview",
+            "transformation": {
+                "fields": [
+                    "title",
+                    "brand",
+                    "reference_number",
+                    "price",
+                    "price_display",
+                    "currency",
+                    "condition",
+                    "availability",
+                    "seller_location",
+                    "country_code",
+                    "shipping_cost",
+                    "promoted",
+                    "url",
+                    "image_url",
+                    "image_gallery",
+                    "listingId",
+                    "search_position",
+                    "total_listings",
+                    "low_price",
+                    "high_price"
+                ]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "title": {
+                        "label": "Title",
+                        "format": "text"
+                    },
+                    "brand": {
+                        "label": "Brand",
+                        "format": "text"
+                    },
+                    "reference_number": {
+                        "label": "Reference",
+                        "format": "text"
+                    },
+                    "price": {
+                        "label": "Price",
+                        "format": "text"
+                    },
+                    "price_display": {
+                        "label": "Price (Display)",
+                        "format": "text"
+                    },
+                    "currency": {
+                        "label": "Currency",
+                        "format": "text"
+                    },
+                    "condition": {
+                        "label": "Condition",
+                        "format": "text"
+                    },
+                    "availability": {
+                        "label": "Availability",
+                        "format": "text"
+                    },
+                    "seller_location": {
+                        "label": "Location",
+                        "format": "text"
+                    },
+                    "country_code": {
+                        "label": "Country",
+                        "format": "text"
+                    },
+                    "shipping_cost": {
+                        "label": "Shipping",
+                        "format": "text"
+                    },
+                    "promoted": {
+                        "label": "Promoted",
+                        "format": "text"
+                    },
+                    "url": {
+                        "label": "URL",
+                        "format": "link"
+                    },
+                    "image_url": {
+                        "label": "Image",
+                        "format": "image"
+                    },
+                    "image_gallery": {
+                        "label": "Gallery",
+                        "format": "text"
+                    },
+                    "listingId": {
+                        "label": "Listing ID",
+                        "format": "text"
+                    },
+                    "total_listings": {
+                        "label": "Total",
+                        "format": "text"
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,27 @@
+# configurations
+.idea
+.vscode
+.zed
+.editorconfig
+.prettierrc
+eslint.config.mjs
+
+# crawlee and apify storage folders
+apify_storage
+crawlee_storage
+storage
+
+# installed files
+node_modules
+
+# git folder
+.git
+.gitattributes
+.gitignore
+
+# logs
+*.log
+
+# docs
+README.md
+API_DISCOVERY.md
