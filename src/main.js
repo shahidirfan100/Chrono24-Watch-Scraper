@@ -8,19 +8,13 @@ const BASE_URL = 'https://www.chrono24.com';
 await Actor.init();
 
 const input = (await Actor.getInput()) || {};
-const {
-    url: startUrl,
-    keyword,
-    results_wanted = 20,
-    max_pages = 5,
-    proxyConfiguration: proxyConfig,
-} = input;
+const { url: startUrl, keyword, results_wanted = 20, max_pages = 5, proxyConfiguration: proxyConfig } = input;
 
 // ── Build the first search URL ─────────────────────────────────────────────
 function buildSearchUrl(kw) {
     const u = new URL('/search/index.htm', BASE_URL);
     u.searchParams.set('dosearch', 'true');
-    u.searchParams.set('query', kw || 'rolex');
+    u.searchParams.set('query', kw);
     u.searchParams.set('pageSize', '60');
     u.searchParams.set('showPage', '1');
     return u.href;
@@ -108,9 +102,7 @@ function normalizeOffer(offer, parent) {
     // Availability — convert schema.org URL to readable string
     let availability = offer.availability || null;
     if (availability) {
-        availability = availability
-            .replace('http://schema.org/', '')
-            .replace('https://schema.org/', '');
+        availability = availability.replace('http://schema.org/', '').replace('https://schema.org/', '');
     }
 
     // Brand — from offer or parent context
@@ -159,7 +151,11 @@ function extractFromHtml(body) {
         let listingId = null;
         const wlData = $el.find('c24-wishlist-toggle script[type="application/json"]').text();
         if (wlData) {
-            try { listingId = JSON.parse(wlData).listingId; } catch { /* ignore */ }
+            try {
+                listingId = JSON.parse(wlData).listingId;
+            } catch {
+                /* ignore */
+            }
         }
         // Fallback: extract from URL
         if (!listingId) {
@@ -191,7 +187,10 @@ function extractFromHtml(body) {
         const sellerFrom = locationEl.attr('data-content') || null;
 
         // Promoted badge
-        const promoted = !!$el.find('.wt-listing-item-image-badge').text().match(/Promoted/i);
+        const promoted = !!$el
+            .find('.wt-listing-item-image-badge')
+            .text()
+            .match(/Promoted/i);
 
         // Condition from image alt text or subtitle
         let condition = null;
@@ -265,89 +264,238 @@ function mergeListings(jsonldItems, htmlItems) {
 function createClient(browser, proxyUrl) {
     return new Impit({
         browser,
-        ignoreTlsErrors: true,
         ...(proxyUrl && { proxyUrl }),
     });
 }
 
-// ── Detect Cloudflare block ──────────────────────────────────────────────────
+// ── Detect Cloudflare challenges ────────────────────────────────────────────
 function isCloudflareBlock(body, statusCode) {
-    if (statusCode === 403 || statusCode === 503) return true;
-    if (!body || body.length < 5000) return true;
-    if (body.includes('cf-browser-verification') || body.includes('_cf_chl_opt')) return true;
-    if (body.includes('Just a moment') || body.includes('Checking your browser')) return true;
-    return false;
+    if (statusCode === 403) return true;
+
+    const normalizedBody = body.toLowerCase();
+    return ['cf-browser-verification', '_cf_chl_opt', 'just a moment', 'checking your browser'].some((marker) =>
+        normalizedBody.includes(marker),
+    );
 }
 
-// ── Fetch a page with retry, profile fallback, and session rotation ──────────
 const BROWSER_PROFILES = ['firefox', 'chrome'];
+const MAX_ATTEMPTS_PER_PROFILE = 3;
+const MAX_RETRY_DELAY_MS = 10_000;
 
-async function fetchPage(url, proxyUrl) {
-    let lastError;
+function isTemporaryNetworkError(error) {
+    const errorDetails = [error?.code, error?.cause?.code, error?.name, error?.message].filter(Boolean).join(' ');
+    const retryableIndicators = [
+        'timeout',
+        'timed out',
+        'econnreset',
+        'econnrefused',
+        'ehostunreach',
+        'enetunreach',
+        'eai_again',
+        'socket',
+        'network error',
+        'fetch failed',
+        'und_err_',
+    ];
+    return retryableIndicators.some((indicator) => errorDetails.toLowerCase().includes(indicator));
+}
 
-    for (const browser of BROWSER_PROFILES) {
-        for (let attempt = 1; attempt <= 3; attempt++) {
-            const client = createClient(browser, proxyUrl);
+function getRetryDelay(response, attempt) {
+    const retryAfter = response?.headers?.get?.('retry-after');
+    if (retryAfter) {
+        const seconds = Number(retryAfter);
+        const retryAfterMs = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(retryAfter) - Date.now();
 
-            try {
-                const response = await client.fetch(url, {
-                    headers: { Referer: BASE_URL },
-                });
-
-                const body = await response.text();
-                const statusCode = response.status;
-
-                if (!isCloudflareBlock(body, statusCode)) {
-                    return { body, statusCode };
-                }
-
-                lastError = `HTTP ${statusCode} / CF block with ${browser} (attempt ${attempt})`;
-                log.debug(`${lastError} - retrying...`);
-
-                // Exponential backoff + jitter before retry
-                const wait = attempt * 3000 + Math.random() * 2000;
-                await new Promise(r => { setTimeout(r, wait); });
-            } catch (err) {
-                lastError = `${browser} attempt ${attempt}: ${err.message}`;
-                log.debug(lastError);
-                await new Promise(r => { setTimeout(r, 2000); });
-            }
+        if (Number.isFinite(retryAfterMs) && retryAfterMs >= 0) {
+            return Math.min(retryAfterMs, MAX_RETRY_DELAY_MS);
         }
     }
 
-    throw new Error(`All profiles exhausted. Last error: ${lastError}`);
+    const backoff = 1000 * 2 ** (attempt - 1);
+    return Math.min(backoff + Math.random() * 500, MAX_RETRY_DELAY_MS);
+}
+
+function sleep(milliseconds) {
+    return new Promise((resolve) => {
+        setTimeout(resolve, milliseconds);
+    });
+}
+
+// ── Fetch a page with bounded retry and profile fallback ────────────────────
+async function fetchPage(url, proxyUrl, clients) {
+    let lastError;
+
+    for (const browser of BROWSER_PROFILES) {
+        let client = clients.get(browser);
+        if (!client) {
+            client = createClient(browser, proxyUrl);
+            clients.set(browser, client);
+        }
+
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_PROFILE; attempt++) {
+            let response;
+            try {
+                response = await client.fetch(url, {
+                    headers: { Referer: BASE_URL },
+                });
+            } catch (err) {
+                if (!isTemporaryNetworkError(err)) throw err;
+                lastError = `${browser} request failed: ${err.message}`;
+                if (attempt < MAX_ATTEMPTS_PER_PROFILE) {
+                    log.warning(
+                        `Temporary network error; retrying request (${attempt + 1}/${MAX_ATTEMPTS_PER_PROFILE}).`,
+                    );
+                    await sleep(getRetryDelay(null, attempt));
+                    continue;
+                }
+                break;
+            }
+
+            if (!response || !Number.isInteger(response.status) || typeof response.text !== 'function') {
+                throw new Error('Chrono24 returned an invalid HTTP response.');
+            }
+
+            let body;
+            try {
+                body = await response.text();
+            } catch (err) {
+                if (!isTemporaryNetworkError(err)) throw err;
+                lastError = `${browser} response read failed: ${err.message}`;
+                if (attempt < MAX_ATTEMPTS_PER_PROFILE) {
+                    log.warning(
+                        `Temporary response error; retrying request (${attempt + 1}/${MAX_ATTEMPTS_PER_PROFILE}).`,
+                    );
+                    await sleep(getRetryDelay(response, attempt));
+                    continue;
+                }
+                break;
+            }
+
+            if (typeof body !== 'string') {
+                throw new Error('Chrono24 returned a non-text response body.');
+            }
+
+            const statusCode = response.status;
+            if (statusCode === 429) {
+                lastError = `HTTP ${statusCode}`;
+                if (attempt < MAX_ATTEMPTS_PER_PROFILE) {
+                    log.warning(
+                        `Chrono24 returned HTTP ${statusCode}; retrying (${attempt + 1}/${MAX_ATTEMPTS_PER_PROFILE}).`,
+                    );
+                    await sleep(getRetryDelay(response, attempt));
+                    continue;
+                }
+                throw new Error(`Chrono24 returned HTTP ${statusCode} after ${MAX_ATTEMPTS_PER_PROFILE} attempts.`);
+            }
+
+            if (isCloudflareBlock(body, statusCode)) {
+                lastError = `Cloudflare challenge with ${browser} (HTTP ${statusCode})`;
+                if (attempt < MAX_ATTEMPTS_PER_PROFILE) {
+                    log.warning(
+                        `Cloudflare challenge detected; retrying request (${attempt + 1}/${MAX_ATTEMPTS_PER_PROFILE}).`,
+                    );
+                    await sleep(getRetryDelay(response, attempt));
+                    continue;
+                }
+                break;
+            }
+
+            if (statusCode >= 500 && statusCode <= 599) {
+                lastError = `HTTP ${statusCode}`;
+                if (attempt < MAX_ATTEMPTS_PER_PROFILE) {
+                    log.warning(
+                        `Chrono24 returned HTTP ${statusCode}; retrying (${attempt + 1}/${MAX_ATTEMPTS_PER_PROFILE}).`,
+                    );
+                    await sleep(getRetryDelay(response, attempt));
+                    continue;
+                }
+                throw new Error(`Chrono24 returned HTTP ${statusCode} after ${MAX_ATTEMPTS_PER_PROFILE} attempts.`);
+            }
+
+            if (statusCode < 200 || statusCode >= 300) {
+                throw new Error(`Chrono24 returned non-retryable HTTP ${statusCode}.`);
+            }
+
+            if (!body.trim()) {
+                throw new Error('Chrono24 returned an empty response body.');
+            }
+
+            const contentType = response.headers?.get?.('content-type') || '';
+            if (contentType && !/^(text\/html|application\/xhtml\+xml)(;|$)/i.test(contentType)) {
+                throw new Error(`Chrono24 returned an unexpected content type: ${contentType.split(';')[0]}.`);
+            }
+
+            return { body, statusCode };
+        }
+    }
+
+    throw new Error(`All browser profiles exhausted. Last error: ${lastError || 'unknown failure'}`);
+}
+
+function getPositiveInteger(value, fallback, fieldName) {
+    if (value === undefined || value === null) return fallback;
+
+    const number = Number(value);
+    if (!Number.isSafeInteger(number) || number < 1) {
+        throw new Error(`${fieldName} must be a positive integer.`);
+    }
+    return number;
+}
+
+function getSeedUrl() {
+    const normalizedUrl = typeof startUrl === 'string' ? startUrl.trim() : '';
+    const normalizedKeyword = typeof keyword === 'string' ? keyword.trim() : '';
+
+    if (normalizedUrl && normalizedKeyword) {
+        log.warning('Both URL and keyword were provided; using the URL search mode.');
+    }
+
+    if (normalizedUrl) {
+        let parsedUrl;
+        try {
+            parsedUrl = new URL(normalizedUrl);
+        } catch {
+            throw new Error('The provided URL must be a valid HTTP(S) URL.');
+        }
+        if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+            throw new Error('The provided URL must use HTTP or HTTPS.');
+        }
+        return parsedUrl.href;
+    }
+
+    if (normalizedKeyword) return buildSearchUrl(normalizedKeyword);
+    throw new Error('Provide either a Chrono24 search URL or a keyword.');
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
-const resultsWanted = Math.max(1, Number(results_wanted) || 20);
-const maxPages = Math.max(1, Number(max_pages) || 5);
-const seedUrl = startUrl || buildSearchUrl(keyword);
+const resultsWanted = getPositiveInteger(results_wanted, 20, 'results_wanted');
+const maxPages = getPositiveInteger(max_pages, 5, 'max_pages');
+const seedUrl = getSeedUrl();
 
-const proxyConfiguration = proxyConfig
-    ? await Actor.createProxyConfiguration(proxyConfig)
-    : undefined;
+const proxyConfiguration = proxyConfig ? await Actor.createProxyConfiguration(proxyConfig) : undefined;
+const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl() : undefined;
+const clients = new Map();
+
+if (!proxyUrl) {
+    log.warning('No proxy is configured. Chrono24 may block requests from datacenter or local IP addresses.');
+}
 
 let saved = 0;
 const seen = new Set();
 
-    log.info(`Starting Chrono24 extraction. Target: ${resultsWanted} listings.`);
+log.info(`Starting Chrono24 extraction. Target: ${resultsWanted} listings.`);
 
 for (let page = 1; page <= maxPages && saved < resultsWanted; page++) {
     const pageUrl = buildPageUrl(seedUrl, page);
-    const proxyUrl = proxyConfiguration ? await proxyConfiguration.newUrl() : undefined;
 
     log.info(`Fetching page ${page}...`);
 
     let body;
     try {
-        ({ body } = await fetchPage(pageUrl, proxyUrl));
+        ({ body } = await fetchPage(pageUrl, proxyUrl, clients));
     } catch (err) {
-        log.error(`All fetch attempts failed on page ${page}: ${err.message}`);
-        log.warning(
-            'Chrono24 is blocking the requests. ' +
-            'If running on Apify, enable Apify Proxy with a residential proxy group ' +
-            'in the proxyConfiguration input field for reliable results.',
-        );
+        log.error(`Chrono24 request failed on page ${page}: ${err.message}`);
+        log.warning('Check the search URL and proxy configuration; Cloudflare challenges may still occur.');
         break;
     }
 
@@ -361,7 +509,7 @@ for (let page = 1; page <= maxPages && saved < resultsWanted; page++) {
     if (items.length === 0) {
         log.warning(
             `No listings found on page ${page}. ` +
-            'Chrono24 may have changed its structured data format, or all listings have been collected.',
+                'Chrono24 may have changed its structured data format, or all listings have been collected.',
         );
         break;
     }
@@ -390,15 +538,13 @@ for (let page = 1; page <= maxPages && saved < resultsWanted; page++) {
     // Human-like delay between pages (2–5s)
     const delay = 2000 + Math.random() * 3000;
     log.info(`Waiting ${Math.round(delay / 1000)}s before next page...`);
-    await new Promise(r => { setTimeout(r, delay); });
+    await new Promise((r) => {
+        setTimeout(r, delay);
+    });
 }
 
 if (saved === 0) {
-    log.warning(
-        'No Chrono24 listings were saved. ' +
-        'If running on Apify infrastructure, enable Apify Proxy with a residential proxy group ' +
-        'in the proxyConfiguration input field to bypass Cloudflare protection.',
-    );
+    log.warning('No listings were saved. Verify the search input and proxy configuration if requests were blocked.');
 }
 
 log.info(`Extraction complete. Total saved: ${saved} listings.`);

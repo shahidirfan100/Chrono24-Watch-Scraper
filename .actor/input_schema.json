@@ -1,6 +1,6 @@
 {
     "title": "Chrono24 Watch Scraper",
-    "description": "Scrape Chrono24 watch listings from a search URL or keyword. User-provided URL/keyword values always take priority over the sample INPUT.json defaults.",
+    "description": "Scrape Chrono24 watch listings from either a search URL or a keyword. Provide one search mode; the URL takes priority if both are supplied.",
     "type": "object",
     "schemaVersion": 1,
     "properties": {
@@ -8,15 +8,13 @@
             "title": "Chrono24 URL",
             "type": "string",
             "description": "Chrono24 search/category URL, for example https://www.chrono24.com/rolex/index.htm?dosearch=true&query=rolex",
-            "editor": "textfield",
-            "prefill": "https://www.chrono24.com/rolex/index.htm?dosearch=true&query=rolex"
+            "editor": "textfield"
         },
         "keyword": {
             "title": "Keyword",
             "type": "string",
             "description": "Search keyword used when no URL is provided.",
-            "editor": "textfield",
-            "prefill": "rolex"
+            "editor": "textfield"
         },
         "results_wanted": {
             "title": "Results wanted",
@@ -37,10 +35,11 @@
         "proxyConfiguration": {
             "title": "Proxy configuration",
             "type": "object",
-            "description": "Use Apify Proxy for production runs. Residential proxy is recommended if Chrono24 returns Cloudflare challenges.",
+            "description": "Residential Apify Proxy is enabled by default. You can change the proxy groups or disable the proxy.",
             "editor": "proxy",
             "default": {
-                "useApifyProxy": false
+                "useApifyProxy": true,
+                "apifyProxyGroups": ["RESIDENTIAL"]
             }
         }
     },
